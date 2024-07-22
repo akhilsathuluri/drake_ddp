@@ -9,7 +9,8 @@ import time
 import numpy as np
 import utils_derivs_interpolation
 
-class IterativeLinearQuadraticRegulator():
+
+class IterativeLinearQuadraticRegulator:
     """
     Set up and solve a trajectory optimization problem of the form
 
@@ -18,35 +19,51 @@ class IterativeLinearQuadraticRegulator():
 
     using iLQR.
     """
-    def __init__(self, system, num_timesteps, 
-            input_port_index=0, delta=1e-2, beta=0.95, gamma=0.0, derivs_keypoint_method = None):
+
+    def __init__(
+        self,
+        system,
+        context,
+        system_ad,
+        context_ad,
+        num_timesteps,
+        input_port_index=0,
+        delta=1e-2,
+        beta=0.95,
+        gamma=0.0,
+        derivs_keypoint_method=None,
+    ):
         """
         Args:
             system:             Drake System describing the discrete-time dynamics
                                  x_{t+1} = f(x_t,u_t). Must be discrete-time.
             num_timesteps:      Number of timesteps to consider in the optimization.
             input_port_index:   InputPortIndex for the control input u_t. Default is to
-                                 use the first port. 
+                                 use the first port.
             delta:              Termination criterion - the algorithm ends when the improvement
-                                 in the total cost is less than delta. 
+                                 in the total cost is less than delta.
             beta:               Linesearch parameter in (0,1). Higher values lead to smaller
-                                 linesearch steps. 
+                                 linesearch steps.
             gamma:              Linesearch parameter in [0,1). Higher values mean linesearch
                                  is performed more often in hopes of larger cost reductions.
         """
-        assert system.IsDifferenceEquationSystem()[0],  "must be a discrete-time system"
+        assert system.IsDifferenceEquationSystem()[0], "must be a discrete-time system"
 
         # float-type copy of the system and context for linesearch.
         # Computations using this system are fast but don't support gradients
         self.system = system
-        self.context = self.system.CreateDefaultContext()
+        self.context = context
+        # self.context = self.system.CreateDefaultContext()
         self.input_port = self.system.get_input_port(input_port_index)
 
         # Autodiff copy of the system for computing dynamics gradients
-        self.system_ad = system.ToAutoDiffXd()
-        self.context_ad = self.system_ad.CreateDefaultContext()
+        self.system_ad = system_ad
+        self.context_ad = context_ad
+        # self.system_ad = system.ToAutoDiffXd()
+        # self.context_ad = self.system_ad.GetMyMutableContextFromRoot(context)
+        # self.context_ad = self.system_ad.CreateDefaultContext()
         self.input_port_ad = self.system_ad.get_input_port(input_port_index)
-       
+
         # Set some parameters
         self.N = num_timesteps
         self.delta = delta
@@ -67,20 +84,20 @@ class IterativeLinearQuadraticRegulator():
         self.Qf = np.eye(self.n)
 
         # Arrays to store best guess of control and state trajectory
-        self.x_bar = np.zeros((self.n,self.N))
-        self.u_bar = np.zeros((self.m,self.N-1))
+        self.x_bar = np.zeros((self.n, self.N))
+        self.u_bar = np.zeros((self.m, self.N - 1))
 
         # Arrays to store dynamics gradients
-        self.fx = np.zeros((self.n,self.n,self.N-1))
-        self.fu = np.zeros((self.n,self.m,self.N-1))
+        self.fx = np.zeros((self.n, self.n, self.N - 1))
+        self.fu = np.zeros((self.n, self.m, self.N - 1))
 
         # Local feedback gains u = u_bar - eps*kappa_t - K_t*(x-x_bar)
-        self.kappa = np.zeros((self.m,self.N-1))
-        self.K = np.zeros((self.m,self.n,self.N-1))
+        self.kappa = np.zeros((self.m, self.N - 1))
+        self.K = np.zeros((self.m, self.n, self.N - 1))
 
-        # Coefficents Qu'*Quu^{-1}*Qu for computing the expected 
+        # Coefficents Qu'*Quu^{-1}*Qu for computing the expected
         # reduction in cost dV = sum_t eps*(1-eps/2)*Qu'*Quu^{-1}*Qu
-        self.dV_coeff = np.zeros(self.N-1)
+        self.dV_coeff = np.zeros(self.N - 1)
 
         # -------------------------------- Derivatives interpolation  --------------------------------------
 
@@ -95,7 +112,9 @@ class IterativeLinearQuadraticRegulator():
 
         # If no derivs_interpolation specified - use the baseline case (setInterval1 - computing derivatives at every time-step)
         if derivs_keypoint_method is None:
-            self.derivs_interpolation = utils_derivs_interpolation.derivs_interpolation('setInterval', 1, 0, 0, 0)
+            self.derivs_interpolation = utils_derivs_interpolation.derivs_interpolation(
+                "setInterval", 1, 0, 0, 0
+            )
         else:
             self.derivs_interpolation = derivs_keypoint_method
 
@@ -127,8 +146,8 @@ class IterativeLinearQuadraticRegulator():
             Q:  The (n,n) state penalty matrix
             R:  The (m,m) control penalty matrix
         """
-        assert Q.shape == (self.n,self.n)
-        assert R.shape == (self.m,self.m)
+        assert Q.shape == (self.n, self.n)
+        assert R.shape == (self.m, self.m)
 
         self.Q = Q
         self.R = R
@@ -144,7 +163,7 @@ class IterativeLinearQuadraticRegulator():
         """
         assert Qf.shape == (self.n, self.n)
         self.Qf = Qf
-    
+
     def SetInitialGuess(self, u_guess):
         """
         Set the initial guess of control tape.
@@ -152,7 +171,7 @@ class IterativeLinearQuadraticRegulator():
         Args:
             u_guess:    (m,N-1) numpy array containing u at each timestep
         """
-        assert u_guess.shape == (self.m, self.N-1)
+        assert u_guess.shape == (self.m, self.N - 1)
         self.u_bar = u_guess
 
     def SetControlLimits(self, u_min, u_max):
@@ -177,11 +196,11 @@ class IterativeLinearQuadraticRegulator():
             luu:    2nd order partial w.r.t. u
             lux:    2nd order partial w.r.t. u and x
         """
-        lx = 2*self.Q@x - 2*self.x_nom.T@self.Q
-        lu = 2*self.R@u
-        lxx = 2*self.Q
-        luu = 2*self.R
-        lux = np.zeros((self.m,self.n))
+        lx = 2 * self.Q @ x - 2 * self.x_nom.T @ self.Q
+        lu = 2 * self.R @ u
+        lxx = 2 * self.Q
+        luu = 2 * self.R
+        lux = np.zeros((self.m, self.n))
 
         return (lx, lu, lxx, luu, lux)
 
@@ -191,7 +210,7 @@ class IterativeLinearQuadraticRegulator():
 
             lf = x'Qfx
 
-        for the given state values. 
+        for the given state values.
 
         Args:
             x: numpy array representing state
@@ -200,19 +219,19 @@ class IterativeLinearQuadraticRegulator():
             lf_x:   gradient of terminal cost
             lf_xx:  hessian of terminal cost
         """
-        lf_x = 2*self.Qf@x - 2*self.x_nom.T@self.Qf
-        lf_xx = 2*self.Qf
+        lf_x = 2 * self.Qf @ x - 2 * self.x_nom.T @ self.Qf
+        lf_xx = 2 * self.Qf
 
         return (lf_x, lf_xx)
-    
+
     def _calc_dynamics(self, x, u):
         """
         Given a system state (x) and a control input (u),
-        compute the next state 
+        compute the next state
 
             x_next = f(x,u)
 
-        Args:   
+        Args:
             x:  An (n,) numpy array representing the state
             u:  An (m,) numpy array representing the control input
 
@@ -238,22 +257,22 @@ class IterativeLinearQuadraticRegulator():
             x_next = f(x,u)
             fx = partial f(x,u) / partial x
             fu = partial f(x,u) / partial u
-        
-        Args:   
+
+        Args:
             x:  An (n,) numpy array representing the state
             u:  An (m,) numpy array representing the control input
 
         Returns:
-            fx:     A (n,n) numpy array representing the partial derivative 
+            fx:     A (n,n) numpy array representing the partial derivative
                     of f with respect to x.
-            fu:     A (n,m) numpy array representing the partial derivative 
+            fu:     A (n,m) numpy array representing the partial derivative
                     of f with respect to u.
         """
         # Create autodiff versions of x and u
-        xu = np.hstack([x,u])
+        xu = np.hstack([x, u])
         xu_ad = InitializeAutoDiff(xu)
-        x_ad = xu_ad[:self.n]
-        u_ad = xu_ad[self.n:]
+        x_ad = xu_ad[: self.n]
+        u_ad = xu_ad[self.n :]
 
         # Set input and state variables in our stored model accordingly
         self.context_ad.SetDiscreteState(x_ad)
@@ -263,18 +282,18 @@ class IterativeLinearQuadraticRegulator():
         state = self.context_ad.get_discrete_state()
         self.system_ad.CalcForcedDiscreteVariableUpdate(self.context_ad, state)
         x_next = state.get_vector().CopyToVector()
-       
+
         # Compute partial derivatives
         G = ExtractGradient(x_next)
-        fx = G[:,:self.n]
-        fu = G[:,self.n:]
+        fx = G[:, : self.n]
+        fu = G[:, self.n :]
 
         return (fx, fu)
 
     def _linesearch(self, L_last):
         """
         Determine a value of eps in (0,1] that results in a suitably
-        reduced cost, based on forward simulations of the system. 
+        reduced cost, based on forward simulations of the system.
 
         This involves simulating the system according to the control law
 
@@ -305,37 +324,43 @@ class IterativeLinearQuadraticRegulator():
             # Simulate system forward using the given eps value
             L = 0
             expected_improvement = 0
-            x = np.zeros((self.n,self.N))
-            u = np.zeros((self.m,self.N-1))
+            x = np.zeros((self.n, self.N))
+            u = np.zeros((self.m, self.N - 1))
 
-            x[:,0] = self.x0
-            for t in range(0,self.N-1):
-                u[:,t] = self.u_bar[:,t] - eps*self.kappa[:,t] - self.K[:,:,t]@(x[:,t] - self.x_bar[:,t])
-                   
+            x[:, 0] = self.x0
+            for t in range(0, self.N - 1):
+                u[:, t] = (
+                    self.u_bar[:, t]
+                    - eps * self.kappa[:, t]
+                    - self.K[:, :, t] @ (x[:, t] - self.x_bar[:, t])
+                )
+
                 try:
-                    x[:,t+1] = self._calc_dynamics(x[:,t], u[:,t])
+                    x[:, t + 1] = self._calc_dynamics(x[:, t], u[:, t])
                 except RuntimeError as e:
-                    # If dynamics are infeasible, consider the loss to be infinite 
+                    # If dynamics are infeasible, consider the loss to be infinite
                     # and stop simulating. This will lead to a reduction in eps
                     print("Warning: encountered infeasible simulation in linesearch")
-                    #print(e)
+                    # print(e)
                     L = np.inf
                     break
 
-                L += (x[:,t]-self.x_nom).T@self.Q@(x[:,t]-self.x_nom) + u[:,t].T@self.R@u[:,t]
-                expected_improvement += -eps*(1-eps/2)*self.dV_coeff[t]
-            L += (x[:,-1]-self.x_nom).T@self.Qf@(x[:,-1]-self.x_nom)
+                L += (x[:, t] - self.x_nom).T @ self.Q @ (x[:, t] - self.x_nom) + u[
+                    :, t
+                ].T @ self.R @ u[:, t]
+                expected_improvement += -eps * (1 - eps / 2) * self.dV_coeff[t]
+            L += (x[:, -1] - self.x_nom).T @ self.Qf @ (x[:, -1] - self.x_nom)
 
             # Chech whether the improvement is sufficient
             improvement = L_last - L
-            if improvement > self.gamma*expected_improvement:
+            if improvement > self.gamma * expected_improvement:
                 return eps, x, u, L, n_iters
 
             # Otherwise reduce eps by a factor of beta
             eps *= self.beta
 
-        raise RuntimeError("linesearch failed after %s iterations"%n_iters)
-    
+        raise RuntimeError("linesearch failed after %s iterations" % n_iters)
+
     def _forward_pass(self, L_last):
         """
         Simulate the system forward in time using the local feedback
@@ -343,8 +368,8 @@ class IterativeLinearQuadraticRegulator():
 
             u = u_bar - eps*kappa - K*(x-x_bar).
 
-        Performs a linesearch on eps to (approximately) determine the 
-        largest value in (0,1] that results in a reduced cost. 
+        Performs a linesearch on eps to (approximately) determine the
+        largest value in (0,1] that results in a reduced cost.
 
         Args:
             L_last: Total loss from last iteration, used for linesearch
@@ -379,7 +404,7 @@ class IterativeLinearQuadraticRegulator():
 
     def _get_derivatives(self, x, u):
         """
-        Calculates the derivatives fx and fu over the entire trajectory. Depending on 
+        Calculates the derivatives fx and fu over the entire trajectory. Depending on
         the keypoint method specified, this function will calculate a set of keypoints.
         At these keypoints the derivatives will be calculated exactly using autodiff.
         In-between these keypoints this function will linearly interpolate approximations
@@ -393,25 +418,30 @@ class IterativeLinearQuadraticRegulator():
 
         # Calculate keypoints over the trajectory
         keyPoints = []
-        if(self.derivs_interpolation.keypoint_method == 'setInterval'):
+        if self.derivs_interpolation.keypoint_method == "setInterval":
             keyPoints = self.get_keypoints_set_interval()
-        elif(self.derivs_interpolation.keypoint_method == 'adaptiveJerk'):
+        elif self.derivs_interpolation.keypoint_method == "adaptiveJerk":
             keyPoints = self.get_keypoints_adaptive_jerk(x, u)
-        elif(self.derivs_interpolation.keypoint_method == 'iterativeError'):
+        elif self.derivs_interpolation.keypoint_method == "iterativeError":
             keyPoints = self.get_keypoints_iterative_error(x, u)
             self.deriv_calculated_at_index = [False] * self.N
         else:
-            raise Exception('unknown interpolation method')
+            raise Exception("unknown interpolation method")
 
         self.percentage_derivs = (len(keyPoints) / (self.N - 1)) * 100
 
         # Calculate derivatives at keypoints (iterative error method will have already done this)
-        if self.derivs_interpolation.keypoint_method != 'iterativeError':
+        if self.derivs_interpolation.keypoint_method != "iterativeError":
             for t in range(len(keyPoints)):
-                self.fx[:,:,keyPoints[t]], self.fu[:,:,keyPoints[t]] = self._calc_dynamics_partials(x[:,keyPoints[t]], u[:,keyPoints[t]])
+                self.fx[:, :, keyPoints[t]], self.fu[:, :, keyPoints[t]] = (
+                    self._calc_dynamics_partials(x[:, keyPoints[t]], u[:, keyPoints[t]])
+                )
 
         # Interpolate derivatives if required (Interpolation not needed in baseline case (setInterval1))
-        if not (self.derivs_interpolation.keypoint_method == 'setInterval' and self.derivs_interpolation.minN == 1):
+        if not (
+            self.derivs_interpolation.keypoint_method == "setInterval"
+            and self.derivs_interpolation.minN == 1
+        ):
             self.interpolate_derivatives(keyPoints)
 
     def get_keypoints_set_interval(self):
@@ -425,9 +455,9 @@ class IterativeLinearQuadraticRegulator():
 
         keypoints = []
 
-        keypoints = np.arange(0,self.N-1, self.derivs_interpolation.minN).astype(int)
-        if keypoints[-1] != self.N-2:
-            keypoints[-1] = self.N-2
+        keypoints = np.arange(0, self.N - 1, self.derivs_interpolation.minN).astype(int)
+        if keypoints[-1] != self.N - 2:
+            keypoints[-1] = self.N - 2
 
         return keypoints
 
@@ -441,7 +471,7 @@ class IterativeLinearQuadraticRegulator():
         """
         keypoints = []
 
-        dof = int(self.n/2)
+        dof = int(self.n / 2)
 
         jerk_profile = self.calc_jerk_profile(x)
         counter = 0
@@ -456,15 +486,14 @@ class IterativeLinearQuadraticRegulator():
                         keypoints.append(t)
                         counter = 0
                         break
-            
+
             if counter >= self.derivs_interpolation.maxN:
                 keypoints.append(t)
                 counter = 0
 
-            
-        if keypoints[-1] != self.N-2:
-            keypoints[-1] = self.N-2
-                        
+        if keypoints[-1] != self.N - 2:
+            keypoints[-1] = self.N - 2
+
         return keypoints
 
     def calc_jerk_profile(self, x):
@@ -474,22 +503,22 @@ class IterativeLinearQuadraticRegulator():
 
         Returns:    jerk_profile:   jerk profile over the trajectory for each dof
         """
-        dof = int(self.n/2)
-        jerk = np.zeros((self.N-3, dof))
+        dof = int(self.n / 2)
+        jerk = np.zeros((self.N - 3, dof))
         for i in range(dof):
-            for t in range(self.N-3):
-                acell1 = x[i + dof,t+2] - x[i + dof, t+1]
-                acell2 = x[i + dof,t+1] - x[i + dof, t]
+            for t in range(self.N - 3):
+                acell1 = x[i + dof, t + 2] - x[i + dof, t + 1]
+                acell2 = x[i + dof, t + 1] - x[i + dof, t]
 
                 jerk[t, i] = acell1 - acell2
-                
+
         return jerk
 
     def get_keypoints_iterative_error(self, x, u):
         """
         Calculates keypoints at which to calcualte derivatives by checking
-        middle of the inteprolation versus the real value. If the approximation 
-        is valid, no further subdivisions are required. If the approximation is 
+        middle of the inteprolation versus the real value. If the approximation
+        is valid, no further subdivisions are required. If the approximation is
         bad, then further subdivisions are required.
 
         Updates:
@@ -499,12 +528,14 @@ class IterativeLinearQuadraticRegulator():
             keypoints:  list of keypoints to compute dynamics gradients at via autodiff
         """
         keypoints = []
-        binsComplete = False 
-        
-        start_index = 0
-        end_index = self.N-2
+        binsComplete = False
 
-        initial_index_tuple = utils_derivs_interpolation.index_tuple(start_index, end_index)
+        start_index = 0
+        end_index = self.N - 2
+
+        initial_index_tuple = utils_derivs_interpolation.index_tuple(
+            start_index, end_index
+        )
         list_indices_to_check = [initial_index_tuple]
         sub_list_with_midpoints = []
 
@@ -513,12 +544,28 @@ class IterativeLinearQuadraticRegulator():
             all_checks_passed = True
             for i in range(len(list_indices_to_check)):
 
-                approximation_good = self.check_one_matrix_error(list_indices_to_check[i], x, u)
-                mid_index = int((list_indices_to_check[i].start_index + list_indices_to_check[i].end_index)/2)
+                approximation_good = self.check_one_matrix_error(
+                    list_indices_to_check[i], x, u
+                )
+                mid_index = int(
+                    (
+                        list_indices_to_check[i].start_index
+                        + list_indices_to_check[i].end_index
+                    )
+                    / 2
+                )
 
                 if not approximation_good:
-                    sub_list_indices.append(utils_derivs_interpolation.index_tuple(list_indices_to_check[i].start_index, mid_index))
-                    sub_list_indices.append(utils_derivs_interpolation.index_tuple(mid_index, list_indices_to_check[i].end_index))
+                    sub_list_indices.append(
+                        utils_derivs_interpolation.index_tuple(
+                            list_indices_to_check[i].start_index, mid_index
+                        )
+                    )
+                    sub_list_indices.append(
+                        utils_derivs_interpolation.index_tuple(
+                            mid_index, list_indices_to_check[i].end_index
+                        )
+                    )
                     all_checks_passed = False
 
                 else:
@@ -526,14 +573,14 @@ class IterativeLinearQuadraticRegulator():
                     sub_list_with_midpoints.append(mid_index)
                     sub_list_with_midpoints.append(list_indices_to_check[i].end_index)
 
-            if(all_checks_passed):
+            if all_checks_passed:
                 binsComplete = True
 
             list_indices_to_check = sub_list_indices
             sub_list_indices = []
 
-        for i in range(self.N-1):
-            if(self.deriv_calculated_at_index[i]):
+        for i in range(self.N - 1):
+            if self.deriv_calculated_at_index[i]:
                 keypoints.append(i)
 
         return keypoints
@@ -541,7 +588,7 @@ class IterativeLinearQuadraticRegulator():
     def check_one_matrix_error(self, indices, x, u):
         """
         Checks the mean sqaured sum error of two dynamics partials matrices
-        If the error is above the set threshold, the approximation is bad 
+        If the error is above the set threshold, the approximation is bad
         and false is returend. This leads to further subdivisions in the iterative
         error method.
 
@@ -554,44 +601,48 @@ class IterativeLinearQuadraticRegulator():
         """
         approximation_good = True
 
-        if(indices.end_index - indices.start_index <= self.derivs_interpolation.minN):
+        if indices.end_index - indices.start_index <= self.derivs_interpolation.minN:
             return approximation_good
 
         start_index = indices.start_index
-        mid_index = int((indices.start_index + indices.end_index)/2)
+        mid_index = int((indices.start_index + indices.end_index) / 2)
         end_index = indices.end_index
 
-        if(not self.deriv_calculated_at_index[start_index]):
+        if not self.deriv_calculated_at_index[start_index]:
             # Calculate the graident matrices at this index
-            self.fx[:,:,start_index], self.fu[:,:,start_index] = self._calc_dynamics_partials(x[:,start_index], u[:,start_index])
+            self.fx[:, :, start_index], self.fu[:, :, start_index] = (
+                self._calc_dynamics_partials(x[:, start_index], u[:, start_index])
+            )
             self.deriv_calculated_at_index[start_index] = True
 
-        if(not self.deriv_calculated_at_index[mid_index]):
+        if not self.deriv_calculated_at_index[mid_index]:
             # Calculate the graident matrices at this index
-            self.fx[:,:,mid_index], self.fu[:,:,mid_index] = self._calc_dynamics_partials(x[:,mid_index], u[:,mid_index])
+            self.fx[:, :, mid_index], self.fu[:, :, mid_index] = (
+                self._calc_dynamics_partials(x[:, mid_index], u[:, mid_index])
+            )
             self.deriv_calculated_at_index[mid_index] = True
 
-        if(not self.deriv_calculated_at_index[end_index]):
+        if not self.deriv_calculated_at_index[end_index]:
             # Calculate the graident matrices at this index
-            self.fx[:,:,end_index], self.fu[:,:,end_index] = self._calc_dynamics_partials(x[:,end_index], u[:,end_index])
+            self.fx[:, :, end_index], self.fu[:, :, end_index] = (
+                self._calc_dynamics_partials(x[:, end_index], u[:, end_index])
+            )
             self.deriv_calculated_at_index[end_index] = True
 
-        #calculate mid index via interpolation
-        fx_mid_lin = (self.fx[:,:,end_index] + self.fx[:,:,start_index] ) / 2
-
+        # calculate mid index via interpolation
+        fx_mid_lin = (self.fx[:, :, end_index] + self.fx[:, :, start_index]) / 2
 
         sumSqDiff = 0
         for i in range(self.n):
             for j in range(self.n):
-                sumSqDiff += (fx_mid_lin[i,j] - self.fx[i,j,mid_index])**2
+                sumSqDiff += (fx_mid_lin[i, j] - self.fx[i, j, mid_index]) ** 2
 
         average_sq_diff = sumSqDiff / (2 * self.n)
 
-        if(average_sq_diff > self.derivs_interpolation.iterative_error_threshold):
+        if average_sq_diff > self.derivs_interpolation.iterative_error_threshold:
             approximation_good = False
 
         return approximation_good
-
 
     def interpolate_derivatives(self, keyPoints):
         """
@@ -606,25 +657,29 @@ class IterativeLinearQuadraticRegulator():
         # Interpoalte whole matrices
         for i in range(len(keyPoints) - 1):
             startIndex = keyPoints[i]
-            endIndex = keyPoints[i+1]
+            endIndex = keyPoints[i + 1]
 
-            startVals_fx = self.fx[:,:,startIndex]
-            endVals_fx = self.fx[:,:,endIndex]
-            startVals_fu = self.fu[:,:,startIndex]
-            endVals_fu = self.fu[:,:,endIndex]
+            startVals_fx = self.fx[:, :, startIndex]
+            endVals_fx = self.fx[:, :, endIndex]
+            startVals_fu = self.fu[:, :, startIndex]
+            endVals_fu = self.fu[:, :, endIndex]
 
             diff_fx = endVals_fx - startVals_fx
             diff_fu = endVals_fu - startVals_fu
 
             for j in range(startIndex, endIndex):
-                self.fx[:,:,j] = startVals_fx + (endVals_fx - startVals_fx) * (j - startIndex) / (endIndex - startIndex)
-                self.fu[:,:,j] = startVals_fu + (endVals_fu - startVals_fu) * (j - startIndex) / (endIndex - startIndex)
-    
+                self.fx[:, :, j] = startVals_fx + (endVals_fx - startVals_fx) * (
+                    j - startIndex
+                ) / (endIndex - startIndex)
+                self.fu[:, :, j] = startVals_fu + (endVals_fu - startVals_fu) * (
+                    j - startIndex
+                ) / (endIndex - startIndex)
+
     def _backward_pass(self):
         """
         Compute a quadratic approximation of the optimal cost-to-go
-        by simulating the system backward in time. Use this quadratic 
-        approximation and a first-order approximation of the system 
+        by simulating the system backward in time. Use this quadratic
+        approximation and a first-order approximation of the system
         dynamics to compute the feedback controller
 
             u = u_bar - eps*kappa - K*(x-x_bar).
@@ -635,41 +690,41 @@ class IterativeLinearQuadraticRegulator():
             dV_coeff:   coefficients for expected change in cost
         """
         # Store gradient and hessian of cost-to-go
-        Vx, Vxx = self._terminal_cost_partials(self.x_bar[:,-1])
+        Vx, Vxx = self._terminal_cost_partials(self.x_bar[:, -1])
 
         # Do the backwards sweep
-        for t in np.arange(self.N-2,-1,-1):
-            x = self.x_bar[:,t]
-            u = self.u_bar[:,t]
+        for t in np.arange(self.N - 2, -1, -1):
+            x = self.x_bar[:, t]
+            u = self.u_bar[:, t]
 
             # Get second(/first) order approximation of cost(/dynamics)
-            lx, lu, lxx, luu, lux = self._running_cost_partials(x,u)
-            fx = self.fx[:,:,t]
-            fu = self.fu[:,:,t]
+            lx, lu, lxx, luu, lux = self._running_cost_partials(x, u)
+            fx = self.fx[:, :, t]
+            fu = self.fu[:, :, t]
 
             # Construct second-order approximation of cost-to-go
-            Qx = lx + fx.T@Vx
-            Qu = lu + fu.T@Vx
-            Qxx = lxx + fx.T@Vxx@fx
-            Quu = luu + fu.T@Vxx@fu
+            Qx = lx + fx.T @ Vx
+            Qu = lu + fu.T @ Vx
+            Qxx = lxx + fx.T @ Vxx @ fx
+            Quu = luu + fu.T @ Vxx @ fu
             Quu_inv = np.linalg.inv(Quu)
-            Qux = lux + fu.T@Vxx@fx
+            Qux = lux + fu.T @ Vxx @ fx
 
             # Derive controller parameters
-            self.kappa[:,t] = Quu_inv@Qu
-            self.K[:,:,t] = Quu_inv@Qux
+            self.kappa[:, t] = Quu_inv @ Qu
+            self.K[:, :, t] = Quu_inv @ Qux
 
             # Derive cost reduction parameters
-            self.dV_coeff[t] = Qu.T@Quu_inv@Qu
+            self.dV_coeff[t] = Qu.T @ Quu_inv @ Qu
 
             # Update gradient and hessian of cost-to-go
-            Vx = Qx - Qu.T@Quu_inv@Qux
-            Vxx = Qxx - Qux.T@Quu_inv@Qux
+            Vx = Qx - Qu.T @ Quu_inv @ Qux
+            Vxx = Qxx - Qux.T @ Quu_inv @ Qux
 
     def Solve(self):
         """
         Solve the optimization problem and return the (locally) optimal
-        state and input trajectories. 
+        state and input trajectories.
 
         Return:
             x:              (n,N) numpy array containing optimal state trajectory
@@ -682,9 +737,15 @@ class IterativeLinearQuadraticRegulator():
         improvement = np.inf
 
         # Print labels for debug info
-        print("----------------------------------------------------------------------------------------------------------------------------------")
-        print("|    iter    |    cost    |    eps    |    ls    | derivs time | derivs '%'  | bp time  | fp time  |   iter time    |    time    |")
-        print("----------------------------------------------------------------------------------------------------------------------------------")
+        print(
+            "----------------------------------------------------------------------------------------------------------------------------------"
+        )
+        print(
+            "|    iter    |    cost    |    eps    |    ls    | derivs time | derivs '%'  | bp time  | fp time  |   iter time    |    time    |"
+        )
+        print(
+            "----------------------------------------------------------------------------------------------------------------------------------"
+        )
 
         # iteration counter
         i = 1
@@ -701,7 +762,9 @@ class IterativeLinearQuadraticRegulator():
             iter_time = time.time() - st_iter
             total_time = time.time() - st
 
-            print(f"{i:^14}{L_new:11.4f}  {eps:^12.4f}{ls_iters:^11}   {self.time_getDerivs:1.5f}         {self.percentage_derivs:.1f}       {self.time_backwardsPass:1.5f}    {self.time_fp:1.5f}      {iter_time:1.5f}          {total_time:4.2f}")
+            print(
+                f"{i:^14}{L_new:11.4f}  {eps:^12.4f}{ls_iters:^11}   {self.time_getDerivs:1.5f}         {self.percentage_derivs:.1f}       {self.time_backwardsPass:1.5f}    {self.time_fp:1.5f}      {iter_time:1.5f}          {total_time:4.2f}"
+            )
 
             improvement = L - L_new
             L = L_new
@@ -723,10 +786,10 @@ class IterativeLinearQuadraticRegulator():
             fname:  npz file to save the data to.
         """
         dt = self.system.GetSubsystemByName("plant").time_step()
-        T = (self.N-1)*dt
-        t = np.arange(0,T,dt)
+        T = (self.N - 1) * dt
+        t = np.arange(0, T, dt)
 
-        x_bar = self.x_bar[:,:-1]  # remove last timestep
+        x_bar = self.x_bar[:, :-1]  # remove last timestep
         u_bar = self.u_bar
         K = self.K
 
